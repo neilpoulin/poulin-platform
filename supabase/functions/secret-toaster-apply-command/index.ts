@@ -10,6 +10,10 @@ type CommandBody = {
   payload?: Record<string, unknown>;
 };
 
+type GameRoundRow = {
+  round: number;
+};
+
 function asText(value: unknown): string {
   return typeof value === "string" ? value : "";
 }
@@ -53,7 +57,19 @@ Deno.serve(async (req: Request) => {
     if (membershipErr) return serverError("Failed to check membership");
     if (!membership) return forbidden("Not a member of this game");
 
+    const { data: gameRow, error: gameErr } = await service
+      .schema("secret_toaster")
+      .from("games")
+      .select("round")
+      .eq("id", gameId)
+      .single();
+
+    const game = gameRow as GameRoundRow | null;
+
+    if (gameErr || !game) return serverError("Failed to load game round");
+
     const eventPayload = {
+      round: game.round,
       commandType,
       payload,
       source: "edge-function",
@@ -77,6 +93,7 @@ Deno.serve(async (req: Request) => {
     return json(200, {
       ok: true,
       accepted: true,
+      round: game.round,
       eventId: inserted.id,
       createdAt: inserted.created_at,
     });

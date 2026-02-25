@@ -13,7 +13,95 @@ type RoundAdvanceResult = {
   advanced: boolean;
   fromRound: number;
   toRound: number;
+  executedCommandCount: number;
 };
+
+type CommandEventRow = {
+  id: number;
+  caused_by: string | null;
+  payload: Record<string, unknown>;
+};
+
+function hashSeed(value: string): number {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
+function createDeterministicRandom(seedInput: string): () => number {
+  let state = hashSeed(seedInput) || 1;
+
+  return () => {
+    state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+    return state / 4294967296;
+  };
+}
+
+function buildDeterministicExecutionOrder(input: {
+  commands: CommandEventRow[];
+  gameId: string;
+  round: number;
+}): CommandEventRow[] {
+  const { commands, gameId, round } = input;
+  if (commands.length <= 1) return [...commands];
+
+  const commandsByPlayer = new Map<string, CommandEventRow[]>();
+  for (const command of commands) {
+    const playerId = command.caused_by;
+    if (!playerId) continue;
+
+    const queue = commandsByPlayer.get(playerId);
+    if (queue) {
+      queue.push(command);
+    } else {
+      commandsByPlayer.set(playerId, [command]);
+    }
+  }
+
+  const playerOrder = [...commandsByPlayer.keys()].sort();
+  if (playerOrder.length === 0) return [];
+
+  const random = createDeterministicRandom(`${gameId}:${round}:${commands.length}`);
+  const executionOrder: CommandEventRow[] = [];
+
+  while (true) {
+    const activePlayers = playerOrder.filter((playerId) => {
+      const queue = commandsByPlayer.get(playerId);
+      return Boolean(queue && queue.length > 0);
+    });
+
+    if (activePlayers.length === 0) break;
+
+    const playerIndex = Math.floor(random() * activePlayers.length);
+    const selectedPlayer = activePlayers[playerIndex];
+    const queue = commandsByPlayer.get(selectedPlayer);
+    const nextCommand = queue?.shift();
+    if (nextCommand) executionOrder.push(nextCommand);
+  }
+
+  return executionOrder;
+}
+
+function extractCommandPayload(command: CommandEventRow): {
+  commandType: string;
+  payload: Record<string, unknown>;
+} {
+  const rawCommandType = command.payload.commandType;
+  const commandType = typeof rawCommandType === "string" && rawCommandType.trim().length > 0
+    ? rawCommandType
+    : "unknown";
+
+  const rawPayload = command.payload.payload;
+  const payload =
+    rawPayload && typeof rawPayload === "object" && !Array.isArray(rawPayload)
+      ? (rawPayload as Record<string, unknown>)
+      : {};
+
+  return { commandType, payload };
+}
 
 async function advanceRoundIfAllReady(input: {
   service: ReturnType<typeof createServiceClient>;
@@ -43,10 +131,58 @@ async function advanceRoundIfAllReady(input: {
       advanced: false,
       fromRound: round,
       toRound: round,
+      executedCommandCount: 0,
     };
   }
 
   const toRound = updatedGame.round;
+
+  const { data: commandEvents, error: commandEventsErr } = await service
+    .schema("secret_toaster")
+    .from("game_events")
+    .select("id, caused_by, payload")
+    .eq("game_id", gameId)
+    .eq("event_type", "command.received")
+    .eq("payload->>round", String(round))
+    .order("id", { ascending: true });
+
+  if (commandEventsErr) {
+    throw new Error(`Failed to load pending commands: ${commandEventsErr.message}`);
+  }
+
+  const executionOrder = buildDeterministicExecutionOrder({
+    commands: (commandEvents ?? []) as CommandEventRow[],
+    gameId,
+    round,
+  });
+
+  const commandExecutionEvents = executionOrder.map((commandEvent, index) => {
+    const command = extractCommandPayload(commandEvent);
+    return {
+      game_id: gameId,
+      event_type: "command.executed",
+      payload: {
+        round,
+        executionIndex: index,
+        sourceEventId: commandEvent.id,
+        playerUserId: commandEvent.caused_by,
+        commandType: command.commandType,
+        payload: command.payload,
+      },
+      caused_by: commandEvent.caused_by,
+    };
+  });
+
+  if (commandExecutionEvents.length > 0) {
+    const { error: commandExecutionErr } = await service
+      .schema("secret_toaster")
+      .from("game_events")
+      .insert(commandExecutionEvents);
+
+    if (commandExecutionErr) {
+      throw new Error(`Failed to append command execution events: ${commandExecutionErr.message}`);
+    }
+  }
 
   const [{ error: allReadyEventErr }, { error: advancedEventErr }] = await Promise.all([
     service.schema("secret_toaster").from("game_events").insert({
@@ -56,6 +192,7 @@ async function advanceRoundIfAllReady(input: {
         round,
         readyCount,
         activePlayerCount,
+        commandCount: executionOrder.length,
       },
       caused_by: actorUserId,
     }),
@@ -65,7 +202,8 @@ async function advanceRoundIfAllReady(input: {
       payload: {
         fromRound: round,
         toRound,
-        strategy: "all-ready-auto-advance",
+        strategy: "deterministic-v1",
+        commandCount: executionOrder.length,
       },
       caused_by: actorUserId,
     }),
@@ -83,6 +221,7 @@ async function advanceRoundIfAllReady(input: {
     advanced: true,
     fromRound: round,
     toRound,
+    executedCommandCount: executionOrder.length,
   };
 }
 
@@ -198,6 +337,7 @@ Deno.serve(async (req: Request) => {
           advanced: false,
           fromRound: round,
           toRound: round,
+          executedCommandCount: 0,
         };
 
     return json(200, {
@@ -211,6 +351,7 @@ Deno.serve(async (req: Request) => {
       roundAdvanced: roundAdvance.advanced,
       fromRound: roundAdvance.fromRound,
       toRound: roundAdvance.toRound,
+      executedCommandCount: roundAdvance.executedCommandCount,
     });
   } catch (error) {
     console.error("secret-toaster-set-ready error", error);
