@@ -38,6 +38,7 @@ Deno.serve(async (req: Request) => {
 
   try {
     let gameId: string | null = null;
+    let gameCode: string | null = null;
 
     if (isJoinByInvite(body)) {
       const token = body.inviteToken?.trim();
@@ -51,13 +52,22 @@ Deno.serve(async (req: Request) => {
         .single();
 
       if (inviteError || !invite) return forbidden("Invalid invite token");
-      if (invite.used_at) return forbidden("Invite already used");
       if (invite.revoked_at) return forbidden("Invite revoked");
       if (invite.expires_at && new Date(invite.expires_at).getTime() < Date.now()) {
         return forbidden("Invite expired");
       }
 
       gameId = invite.game_id;
+
+      const { data: gameFromInvite, error: inviteGameErr } = await service
+        .schema("secret_toaster")
+        .from("games")
+        .select("game_code")
+        .eq("id", gameId)
+        .maybeSingle();
+
+      if (inviteGameErr || !gameFromInvite) return serverError("Unable to resolve game from invite");
+      gameCode = gameFromInvite.game_code;
 
       const { error: usedErr } = await service
         .schema("secret_toaster")
@@ -66,7 +76,7 @@ Deno.serve(async (req: Request) => {
         .eq("id", invite.id)
         .is("used_at", null);
 
-      if (usedErr) return serverError("Failed to mark invite as used");
+      if (usedErr) return serverError("Failed to track invite usage");
     } else {
       const gameCode = normalizeCode(body.gameCode || "");
       const password = body.password || "";
@@ -75,7 +85,7 @@ Deno.serve(async (req: Request) => {
       const { data: game, error: gameErr } = await service
         .schema("secret_toaster")
         .from("games")
-        .select("id, join_password_hash")
+        .select("id, game_code, join_password_hash")
         .eq("game_code", gameCode)
         .single();
 
@@ -85,6 +95,7 @@ Deno.serve(async (req: Request) => {
       if (!ok) return forbidden("Invalid game code or password");
 
       gameId = game.id;
+      gameCode = game.game_code;
     }
 
     if (!gameId) return serverError("No game resolved");
@@ -108,7 +119,7 @@ Deno.serve(async (req: Request) => {
 
     if (eventErr) return serverError("Failed to append join event");
 
-    return json(200, { ok: true, gameId });
+    return json(200, { ok: true, gameId, gameCode });
   } catch (error) {
     console.error("secret-toaster-join-game error", error);
     return serverError();

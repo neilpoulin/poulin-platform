@@ -16,6 +16,7 @@ Function names are a single slug (no nested path segments). For namespacing, use
 
 - `supabase/functions/_shared/*` shared helpers
 - `supabase/functions/secret-toaster-create-game/index.ts`
+- `supabase/functions/secret-toaster-create-invite/index.ts`
 - `supabase/functions/secret-toaster-join-game/index.ts`
 - `supabase/functions/secret-toaster-apply-command/index.ts`
 
@@ -48,6 +49,7 @@ supabase secrets set SUPABASE_SERVICE_ROLE_KEY="<service-role-key>"
 supabase functions deploy secret-toaster-join-game
 supabase functions deploy secret-toaster-apply-command
 supabase functions deploy secret-toaster-create-game
+supabase functions deploy secret-toaster-create-invite
 ```
 
 4. Invoke from client:
@@ -55,6 +57,9 @@ supabase functions deploy secret-toaster-create-game
 ```ts
 await supabase.functions.invoke("secret-toaster-create-game", {
   body: { title: "Friday Match", password: "toasty" },
+});
+await supabase.functions.invoke("secret-toaster-create-invite", {
+  body: { gameId: "<game-id>", expiresInHours: 72 },
 });
 await supabase.functions.invoke("secret-toaster-join-game", { body: { inviteToken } });
 await supabase.functions.invoke("secret-toaster-apply-command", { body: { gameId, commandType, payload } });

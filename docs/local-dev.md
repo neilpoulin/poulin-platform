@@ -45,6 +45,7 @@ For local-only testing against the local stack, use local URL and keys from `sup
 supabase functions serve secret-toaster-join-game --env-file supabase/functions/.env.local --no-verify-jwt
 supabase functions serve secret-toaster-apply-command --env-file supabase/functions/.env.local --no-verify-jwt
 supabase functions serve secret-toaster-create-game --env-file supabase/functions/.env.local --no-verify-jwt
+supabase functions serve secret-toaster-create-invite --env-file supabase/functions/.env.local --no-verify-jwt
 ```
 
 Endpoint format:
@@ -52,6 +53,7 @@ Endpoint format:
 - `http://127.0.0.1:54321/functions/v1/secret-toaster-join-game`
 - `http://127.0.0.1:54321/functions/v1/secret-toaster-apply-command`
 - `http://127.0.0.1:54321/functions/v1/secret-toaster-create-game`
+- `http://127.0.0.1:54321/functions/v1/secret-toaster-create-invite`
 
 ## 5) Quick smoke tests
 
