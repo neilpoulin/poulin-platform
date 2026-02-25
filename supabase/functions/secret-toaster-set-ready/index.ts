@@ -9,6 +9,83 @@ type SetReadyBody = {
   isReady?: boolean;
 };
 
+type RoundAdvanceResult = {
+  advanced: boolean;
+  fromRound: number;
+  toRound: number;
+};
+
+async function advanceRoundIfAllReady(input: {
+  service: ReturnType<typeof createServiceClient>;
+  gameId: string;
+  actorUserId: string;
+  round: number;
+  readyCount: number;
+  activePlayerCount: number;
+}): Promise<RoundAdvanceResult> {
+  const { service, gameId, actorUserId, round, readyCount, activePlayerCount } = input;
+
+  const { data: updatedGame, error: updateErr } = await service
+    .schema("secret_toaster")
+    .from("games")
+    .update({ round: round + 1 })
+    .eq("id", gameId)
+    .eq("round", round)
+    .select("round")
+    .maybeSingle();
+
+  if (updateErr) {
+    throw new Error(`Failed to advance round: ${updateErr.message}`);
+  }
+
+  if (!updatedGame) {
+    return {
+      advanced: false,
+      fromRound: round,
+      toRound: round,
+    };
+  }
+
+  const toRound = updatedGame.round;
+
+  const [{ error: allReadyEventErr }, { error: advancedEventErr }] = await Promise.all([
+    service.schema("secret_toaster").from("game_events").insert({
+      game_id: gameId,
+      event_type: "round.ready_all",
+      payload: {
+        round,
+        readyCount,
+        activePlayerCount,
+      },
+      caused_by: actorUserId,
+    }),
+    service.schema("secret_toaster").from("game_events").insert({
+      game_id: gameId,
+      event_type: "round.executed",
+      payload: {
+        fromRound: round,
+        toRound,
+        strategy: "all-ready-auto-advance",
+      },
+      caused_by: actorUserId,
+    }),
+  ]);
+
+  if (allReadyEventErr) {
+    throw new Error(`Failed to append ready_all event: ${allReadyEventErr.message}`);
+  }
+
+  if (advancedEventErr) {
+    throw new Error(`Failed to append round.executed event: ${advancedEventErr.message}`);
+  }
+
+  return {
+    advanced: true,
+    fromRound: round,
+    toRound,
+  };
+}
+
 Deno.serve(async (req: Request) => {
   if (req.method !== "POST") return badRequest("POST required");
 
@@ -108,29 +185,32 @@ Deno.serve(async (req: Request) => {
 
     if (readyEventErr) return serverError("Failed to append readiness event");
 
-    if (allReady) {
-      const { error: allReadyEventErr } = await service.schema("secret_toaster").from("game_events").insert({
-        game_id: gameId,
-        event_type: "round.ready_all",
-        payload: {
+    const roundAdvance = allReady
+      ? await advanceRoundIfAllReady({
+          service,
+          gameId,
+          actorUserId: userId,
           round,
           readyCount: safeReadyCount,
           activePlayerCount: safeActivePlayerCount,
-        },
-        caused_by: userId,
-      });
-
-      if (allReadyEventErr) return serverError("Failed to append ready_all event");
-    }
+        })
+      : {
+          advanced: false,
+          fromRound: round,
+          toRound: round,
+        };
 
     return json(200, {
       ok: true,
       gameId,
-      round,
+      round: roundAdvance.toRound,
       isReady,
       readyCount: safeReadyCount,
       activePlayerCount: safeActivePlayerCount,
       allReady,
+      roundAdvanced: roundAdvance.advanced,
+      fromRound: roundAdvance.fromRound,
+      toRound: roundAdvance.toRound,
     });
   } catch (error) {
     console.error("secret-toaster-set-ready error", error);
