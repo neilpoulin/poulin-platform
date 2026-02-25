@@ -55,10 +55,10 @@ function validateCommandPayload(commandType: string, payload: unknown): {
   const fromHexId = asInt(recordPayload.fromHexId);
   const toHexId = asInt(recordPayload.toHexId);
 
-  if (orderNumber === null || orderNumber < 1) {
+  if (orderNumber === null || orderNumber < 1 || orderNumber > 3) {
     return {
       valid: false,
-      reason: "order.submit requires integer orderNumber >= 1",
+      reason: "order.submit requires integer orderNumber in range 1..3",
     };
   }
 

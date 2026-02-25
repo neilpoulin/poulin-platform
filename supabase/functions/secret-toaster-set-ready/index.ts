@@ -103,6 +103,60 @@ function extractCommandPayload(command: CommandEventRow): {
   return { commandType, payload };
 }
 
+function asInt(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) return null;
+  if (!Number.isInteger(value)) return null;
+  return value;
+}
+
+function normalizeQueuedCommands(commands: CommandEventRow[]): CommandEventRow[] {
+  const groupedByPlayer = new Map<string, CommandEventRow[]>();
+
+  for (const command of commands) {
+    if (!command.caused_by) continue;
+    const queue = groupedByPlayer.get(command.caused_by);
+    if (queue) {
+      queue.push(command);
+    } else {
+      groupedByPlayer.set(command.caused_by, [command]);
+    }
+  }
+
+  const normalized: CommandEventRow[] = [];
+
+  for (const [, playerCommands] of groupedByPlayer) {
+    const orderedCommands = [...playerCommands].sort((left, right) => left.id - right.id);
+    const orderSlots = new Map<number, CommandEventRow>();
+    const passthrough: CommandEventRow[] = [];
+
+    for (const command of orderedCommands) {
+      const parsed = extractCommandPayload(command);
+
+      if (parsed.commandType === "order.submit") {
+        const orderNumber = asInt(parsed.payload.orderNumber);
+        if (orderNumber && orderNumber >= 1 && orderNumber <= 3) {
+          orderSlots.set(orderNumber, command);
+          for (let nextOrder = orderNumber + 1; nextOrder <= 3; nextOrder += 1) {
+            orderSlots.delete(nextOrder);
+          }
+          continue;
+        }
+      }
+
+      passthrough.push(command);
+    }
+
+    for (const orderNumber of [1, 2, 3]) {
+      const slotted = orderSlots.get(orderNumber);
+      if (slotted) normalized.push(slotted);
+    }
+
+    normalized.push(...passthrough);
+  }
+
+  return normalized.sort((left, right) => left.id - right.id);
+}
+
 async function advanceRoundIfAllReady(input: {
   service: ReturnType<typeof createServiceClient>;
   gameId: string;
@@ -150,14 +204,17 @@ async function advanceRoundIfAllReady(input: {
     throw new Error(`Failed to load pending commands: ${commandEventsErr.message}`);
   }
 
+  const normalizedCommandEvents = normalizeQueuedCommands((commandEvents ?? []) as CommandEventRow[]);
+
   const executionOrder = buildDeterministicExecutionOrder({
-    commands: (commandEvents ?? []) as CommandEventRow[],
+    commands: normalizedCommandEvents,
     gameId,
     round,
   });
 
   const commandExecutionEvents = executionOrder.map((commandEvent, index) => {
     const command = extractCommandPayload(commandEvent);
+    const orderNumber = asInt(command.payload.orderNumber);
     return {
       game_id: gameId,
       event_type: "command.executed",
@@ -168,6 +225,7 @@ async function advanceRoundIfAllReady(input: {
         playerUserId: commandEvent.caused_by,
         commandType: command.commandType,
         payload: command.payload,
+        orderNumber,
       },
       caused_by: commandEvent.caused_by,
     };
