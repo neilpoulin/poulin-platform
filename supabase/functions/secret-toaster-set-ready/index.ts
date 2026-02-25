@@ -14,12 +14,25 @@ type RoundAdvanceResult = {
   fromRound: number;
   toRound: number;
   executedCommandCount: number;
+  appliedMoveCount: number;
 };
 
 type CommandEventRow = {
   id: number;
   caused_by: string | null;
   payload: Record<string, unknown>;
+};
+
+type GameStateHex = {
+  ownerUserId: string;
+  troopCount: number;
+  knightCount: number;
+};
+
+type GameState = {
+  round: number;
+  hexes: Record<string, GameStateHex>;
+  players?: Record<string, unknown>;
 };
 
 function hashSeed(value: string): number {
@@ -109,6 +122,90 @@ function asInt(value: unknown): number | null {
   return value;
 }
 
+function ensureHex(state: GameState, hexId: number): GameStateHex {
+  const key = String(hexId);
+  const existing = state.hexes[key];
+  if (existing) return existing;
+
+  const created: GameStateHex = {
+    ownerUserId: "",
+    troopCount: 0,
+    knightCount: 0,
+  };
+  state.hexes[key] = created;
+  return created;
+}
+
+function parseGameState(rawState: unknown, round: number): GameState {
+  if (!rawState || typeof rawState !== "object" || Array.isArray(rawState)) {
+    return {
+      round,
+      hexes: {},
+    };
+  }
+
+  const record = rawState as Record<string, unknown>;
+  const rawHexes = record.hexes;
+  const parsedHexes: Record<string, GameStateHex> = {};
+
+  if (rawHexes && typeof rawHexes === "object" && !Array.isArray(rawHexes)) {
+    for (const [key, value] of Object.entries(rawHexes as Record<string, unknown>)) {
+      if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+      const hex = value as Record<string, unknown>;
+      parsedHexes[key] = {
+        ownerUserId: typeof hex.ownerUserId === "string" ? hex.ownerUserId : "",
+        troopCount: asInt(hex.troopCount) ?? 0,
+        knightCount: asInt(hex.knightCount) ?? 0,
+      };
+    }
+  }
+
+  const stateRound = asInt(record.round) ?? round;
+
+  return {
+    round: stateRound,
+    hexes: parsedHexes,
+    players: record.players && typeof record.players === "object" && !Array.isArray(record.players)
+      ? (record.players as Record<string, unknown>)
+      : undefined,
+  };
+}
+
+function applyOrderSubmitMove(state: GameState, command: CommandEventRow): { applied: boolean; movedTroops: number } {
+  const actorUserId = command.caused_by;
+  if (!actorUserId) return { applied: false, movedTroops: 0 };
+
+  const extracted = extractCommandPayload(command);
+  if (extracted.commandType !== "order.submit") return { applied: false, movedTroops: 0 };
+
+  const fromHexId = asInt(extracted.payload.fromHexId);
+  const toHexId = asInt(extracted.payload.toHexId);
+  if (fromHexId === null || toHexId === null) return { applied: false, movedTroops: 0 };
+
+  const fromHex = ensureHex(state, fromHexId);
+  const toHex = ensureHex(state, toHexId);
+  if (fromHex.ownerUserId !== actorUserId) return { applied: false, movedTroops: 0 };
+
+  const availableTroops = Math.max(0, fromHex.troopCount);
+  if (availableTroops <= 0) return { applied: false, movedTroops: 0 };
+
+  const requestedTroops = asInt(extracted.payload.troopCount) ?? asInt(extracted.payload.troops);
+  const movedTroops = requestedTroops && requestedTroops > 0
+    ? Math.min(requestedTroops, availableTroops)
+    : availableTroops;
+
+  if (movedTroops <= 0) return { applied: false, movedTroops: 0 };
+
+  fromHex.troopCount = Math.max(0, fromHex.troopCount - movedTroops);
+  toHex.ownerUserId = actorUserId;
+  toHex.troopCount = Math.max(0, toHex.troopCount) + movedTroops;
+
+  return {
+    applied: true,
+    movedTroops,
+  };
+}
+
 function normalizeQueuedCommands(commands: CommandEventRow[]): CommandEventRow[] {
   const groupedByPlayer = new Map<string, CommandEventRow[]>();
 
@@ -162,10 +259,11 @@ async function advanceRoundIfAllReady(input: {
   gameId: string;
   actorUserId: string;
   round: number;
+  currentState: unknown;
   readyCount: number;
   activePlayerCount: number;
 }): Promise<RoundAdvanceResult> {
-  const { service, gameId, actorUserId, round, readyCount, activePlayerCount } = input;
+  const { service, gameId, actorUserId, round, currentState, readyCount, activePlayerCount } = input;
 
   const { data: updatedGame, error: updateErr } = await service
     .schema("secret_toaster")
@@ -186,6 +284,7 @@ async function advanceRoundIfAllReady(input: {
       fromRound: round,
       toRound: round,
       executedCommandCount: 0,
+      appliedMoveCount: 0,
     };
   }
 
@@ -206,6 +305,9 @@ async function advanceRoundIfAllReady(input: {
 
   const normalizedCommandEvents = normalizeQueuedCommands((commandEvents ?? []) as CommandEventRow[]);
 
+  const nextState = parseGameState(currentState, round);
+  let appliedMoveCount = 0;
+
   const executionOrder = buildDeterministicExecutionOrder({
     commands: normalizedCommandEvents,
     gameId,
@@ -215,6 +317,9 @@ async function advanceRoundIfAllReady(input: {
   const commandExecutionEvents = executionOrder.map((commandEvent, index) => {
     const command = extractCommandPayload(commandEvent);
     const orderNumber = asInt(command.payload.orderNumber);
+    const moveResult = applyOrderSubmitMove(nextState, commandEvent);
+    if (moveResult.applied) appliedMoveCount += 1;
+
     return {
       game_id: gameId,
       event_type: "command.executed",
@@ -226,10 +331,24 @@ async function advanceRoundIfAllReady(input: {
         commandType: command.commandType,
         payload: command.payload,
         orderNumber,
+        applied: moveResult.applied,
+        movedTroops: moveResult.movedTroops,
       },
       caused_by: commandEvent.caused_by,
     };
   });
+
+  nextState.round = toRound;
+
+  const { error: stateUpdateErr } = await service
+    .schema("secret_toaster")
+    .from("games")
+    .update({ current_state: nextState })
+    .eq("id", gameId);
+
+  if (stateUpdateErr) {
+    throw new Error(`Failed to persist current_state: ${stateUpdateErr.message}`);
+  }
 
   if (commandExecutionEvents.length > 0) {
     const { error: commandExecutionErr } = await service
@@ -251,6 +370,7 @@ async function advanceRoundIfAllReady(input: {
         readyCount,
         activePlayerCount,
         commandCount: executionOrder.length,
+        appliedMoveCount,
       },
       caused_by: actorUserId,
     }),
@@ -262,6 +382,7 @@ async function advanceRoundIfAllReady(input: {
         toRound,
         strategy: "deterministic-v1",
         commandCount: executionOrder.length,
+        appliedMoveCount,
       },
       caused_by: actorUserId,
     }),
@@ -280,6 +401,7 @@ async function advanceRoundIfAllReady(input: {
     fromRound: round,
     toRound,
     executedCommandCount: executionOrder.length,
+    appliedMoveCount,
   };
 }
 
@@ -324,7 +446,7 @@ Deno.serve(async (req: Request) => {
     const { data: game, error: gameErr } = await service
       .schema("secret_toaster")
       .from("games")
-      .select("round")
+      .select("round, current_state")
       .eq("id", gameId)
       .single();
 
@@ -388,6 +510,7 @@ Deno.serve(async (req: Request) => {
           gameId,
           actorUserId: userId,
           round,
+          currentState: game.current_state,
           readyCount: safeReadyCount,
           activePlayerCount: safeActivePlayerCount,
         })
@@ -396,6 +519,7 @@ Deno.serve(async (req: Request) => {
           fromRound: round,
           toRound: round,
           executedCommandCount: 0,
+          appliedMoveCount: 0,
         };
 
     return json(200, {
@@ -410,6 +534,7 @@ Deno.serve(async (req: Request) => {
       fromRound: roundAdvance.fromRound,
       toRound: roundAdvance.toRound,
       executedCommandCount: roundAdvance.executedCommandCount,
+      appliedMoveCount: roundAdvance.appliedMoveCount,
     });
   } catch (error) {
     console.error("secret-toaster-set-ready error", error);
