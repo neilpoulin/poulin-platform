@@ -180,7 +180,8 @@ function applyOrderSubmitMove(state: GameState, command: CommandEventRow): { app
 
   const fromHexId = asInt(extracted.payload.fromHexId);
   const toHexId = asInt(extracted.payload.toHexId);
-  if (fromHexId === null || toHexId === null) return { applied: false, movedTroops: 0 };
+  const troopCount = asInt(extracted.payload.troopCount);
+  if (fromHexId === null || toHexId === null || troopCount === null) return { applied: false, movedTroops: 0 };
 
   const fromHex = ensureHex(state, fromHexId);
   const toHex = ensureHex(state, toHexId);
@@ -189,10 +190,7 @@ function applyOrderSubmitMove(state: GameState, command: CommandEventRow): { app
   const availableTroops = Math.max(0, fromHex.troopCount);
   if (availableTroops <= 0) return { applied: false, movedTroops: 0 };
 
-  const requestedTroops = asInt(extracted.payload.troopCount) ?? asInt(extracted.payload.troops);
-  const movedTroops = requestedTroops && requestedTroops > 0
-    ? Math.min(requestedTroops, availableTroops)
-    : availableTroops;
+  const movedTroops = troopCount > 0 ? Math.min(troopCount, availableTroops) : 0;
 
   if (movedTroops <= 0) return { applied: false, movedTroops: 0 };
 

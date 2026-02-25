@@ -14,6 +14,7 @@ type OrderSubmitPayload = {
   orderNumber: number;
   fromHexId: number;
   toHexId: number;
+  troopCount: number;
 };
 
 type GameRoundRow = {
@@ -54,6 +55,7 @@ function validateCommandPayload(commandType: string, payload: unknown): {
   const orderNumber = asInt(recordPayload.orderNumber);
   const fromHexId = asInt(recordPayload.fromHexId);
   const toHexId = asInt(recordPayload.toHexId);
+  const troopCount = asInt(recordPayload.troopCount);
 
   if (orderNumber === null || orderNumber < 1 || orderNumber > 3) {
     return {
@@ -76,10 +78,18 @@ function validateCommandPayload(commandType: string, payload: unknown): {
     };
   }
 
+  if (troopCount === null || troopCount < 1) {
+    return {
+      valid: false,
+      reason: "order.submit requires integer troopCount >= 1",
+    };
+  }
+
   const normalizedOrderPayload: OrderSubmitPayload = {
     orderNumber,
     fromHexId,
     toHexId,
+    troopCount,
   };
 
   return {
