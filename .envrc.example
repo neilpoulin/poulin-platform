@@ -1,0 +1,2 @@
+export LINEAR_API_KEY="lin_api_..."
+export SUPABASE_ACCESS_TOKEN="sbp_..."

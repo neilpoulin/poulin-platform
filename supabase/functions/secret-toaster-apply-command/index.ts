@@ -1,0 +1,87 @@
+import "jsr:@supabase/functions-js/edge-runtime.d.ts";
+
+import { getAuthedUserId } from "../_shared/auth.ts";
+import { badRequest, forbidden, json, serverError, unauthorized } from "../_shared/http.ts";
+import { createServiceClient, createUserClient } from "../_shared/supabase.ts";
+
+type CommandBody = {
+  gameId: string;
+  commandType: string;
+  payload?: Record<string, unknown>;
+};
+
+function asText(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
+Deno.serve(async (req: Request) => {
+  if (req.method !== "POST") return badRequest("POST required");
+
+  const authHeader = req.headers.get("Authorization");
+  if (!authHeader) return unauthorized();
+
+  let body: CommandBody;
+  try {
+    body = await req.json();
+  } catch {
+    return badRequest("Invalid JSON body");
+  }
+
+  const gameId = asText(body.gameId).trim();
+  const commandType = asText(body.commandType).trim();
+  const payload = body.payload ?? {};
+
+  if (!gameId) return badRequest("gameId is required");
+  if (!commandType) return badRequest("commandType is required");
+
+  const userClient = createUserClient(authHeader);
+  const service = createServiceClient();
+
+  const userId = await getAuthedUserId(userClient);
+  if (!userId) return unauthorized();
+
+  try {
+    const { data: membership, error: membershipErr } = await service
+      .schema("secret_toaster")
+      .from("game_memberships")
+      .select("id")
+      .eq("game_id", gameId)
+      .eq("user_id", userId)
+      .eq("is_active", true)
+      .maybeSingle();
+
+    if (membershipErr) return serverError("Failed to check membership");
+    if (!membership) return forbidden("Not a member of this game");
+
+    const eventPayload = {
+      commandType,
+      payload,
+      source: "edge-function",
+      version: 1,
+    };
+
+    const { data: inserted, error: eventErr } = await service
+      .schema("secret_toaster")
+      .from("game_events")
+      .insert({
+        game_id: gameId,
+        event_type: "command.received",
+        payload: eventPayload,
+        caused_by: userId,
+      })
+      .select("id, created_at")
+      .single();
+
+    if (eventErr || !inserted) return serverError("Failed to append command event");
+
+    return json(200, {
+      ok: true,
+      accepted: true,
+      eventId: inserted.id,
+      createdAt: inserted.created_at,
+    });
+  } catch (error) {
+    console.error("secret-toaster-apply-command error", error);
+    return serverError();
+  }
+});
