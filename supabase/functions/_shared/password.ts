@@ -4,12 +4,16 @@ async function sha256Hex(input: string): Promise<string> {
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+export async function hashPassword(value: string): Promise<string> {
+  const digest = await sha256Hex(value);
+  return `sha256:${digest}`;
+}
+
 export async function passwordMatches(storedValue: string | null, provided: string): Promise<boolean> {
   if (!storedValue) return false;
 
   if (storedValue.startsWith("sha256:")) {
-    const digest = await sha256Hex(provided);
-    return storedValue === `sha256:${digest}`;
+    return storedValue === await hashPassword(provided);
   }
 
   return storedValue === provided;

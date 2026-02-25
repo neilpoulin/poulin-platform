@@ -15,6 +15,7 @@ Function names are a single slug (no nested path segments). For namespacing, use
 ## Where code lives
 
 - `supabase/functions/_shared/*` shared helpers
+- `supabase/functions/secret-toaster-create-game/index.ts`
 - `supabase/functions/secret-toaster-join-game/index.ts`
 - `supabase/functions/secret-toaster-apply-command/index.ts`
 
@@ -46,11 +47,15 @@ supabase secrets set SUPABASE_SERVICE_ROLE_KEY="<service-role-key>"
 ```bash
 supabase functions deploy secret-toaster-join-game
 supabase functions deploy secret-toaster-apply-command
+supabase functions deploy secret-toaster-create-game
 ```
 
 4. Invoke from client:
 
 ```ts
+await supabase.functions.invoke("secret-toaster-create-game", {
+  body: { title: "Friday Match", password: "toasty" },
+});
 await supabase.functions.invoke("secret-toaster-join-game", { body: { inviteToken } });
 await supabase.functions.invoke("secret-toaster-apply-command", { body: { gameId, commandType, payload } });
 ```
