@@ -35,6 +35,15 @@ type GameState = {
   players?: Record<string, unknown>;
 };
 
+type AppliedCommandResult = {
+  applied: boolean;
+  movedTroops: number;
+  actionType: string;
+  battleRounds: number;
+  stateBefore: GameState;
+  stateAfter: GameState;
+};
+
 function hashSeed(value: string): number {
   let hash = 2166136261;
   for (let index = 0; index < value.length; index += 1) {
@@ -122,6 +131,27 @@ function asInt(value: unknown): number | null {
   return value;
 }
 
+function cloneGameState(state: GameState): GameState {
+  const clonedHexes: Record<string, GameStateHex> = {};
+  for (const [key, value] of Object.entries(state.hexes)) {
+    clonedHexes[key] = {
+      ownerUserId: value.ownerUserId,
+      troopCount: value.troopCount,
+      knightCount: value.knightCount,
+    };
+  }
+
+  return {
+    round: state.round,
+    hexes: clonedHexes,
+    players: state.players ? { ...state.players } : undefined,
+  };
+}
+
+function rollD6(random: () => number): number {
+  return Math.floor(random() * 6) + 1;
+}
+
 function ensureHex(state: GameState, hexId: number): GameStateHex {
   const key = String(hexId);
   const existing = state.hexes[key];
@@ -171,12 +201,37 @@ function parseGameState(rawState: unknown, round: number): GameState {
   };
 }
 
-function applyOrderSubmitMove(state: GameState, command: CommandEventRow): { applied: boolean; movedTroops: number } {
+function applyOrderSubmitMove(input: {
+  state: GameState;
+  command: CommandEventRow;
+  random: () => number;
+  battleBonusByUserId: Map<string, number>;
+}): AppliedCommandResult {
+  const { state, command, random, battleBonusByUserId } = input;
+  const stateBefore = cloneGameState(state);
   const actorUserId = command.caused_by;
-  if (!actorUserId) return { applied: false, movedTroops: 0 };
+  if (!actorUserId) {
+    return {
+      applied: false,
+      movedTroops: 0,
+      actionType: "unknown",
+      battleRounds: 0,
+      stateBefore,
+      stateAfter: cloneGameState(state),
+    };
+  }
 
   const extracted = extractCommandPayload(command);
-  if (extracted.commandType !== "order.submit") return { applied: false, movedTroops: 0 };
+  if (extracted.commandType !== "order.submit") {
+    return {
+      applied: false,
+      movedTroops: 0,
+      actionType: "unknown",
+      battleRounds: 0,
+      stateBefore,
+      stateAfter: cloneGameState(state),
+    };
+  }
 
   const actionType = typeof extracted.payload.actionType === "string" && extracted.payload.actionType.trim().length > 0
     ? extracted.payload.actionType
@@ -184,47 +239,153 @@ function applyOrderSubmitMove(state: GameState, command: CommandEventRow): { app
   const fromHexId = asInt(extracted.payload.fromHexId);
   const toHexId = asInt(extracted.payload.toHexId);
   const troopCount = asInt(extracted.payload.troopCount);
-  if (fromHexId === null || toHexId === null) return { applied: false, movedTroops: 0 };
+  if (fromHexId === null || toHexId === null) {
+    return {
+      applied: false,
+      movedTroops: 0,
+      actionType,
+      battleRounds: 0,
+      stateBefore,
+      stateAfter: cloneGameState(state),
+    };
+  }
 
   const fromHex = ensureHex(state, fromHexId);
   const toHex = ensureHex(state, toHexId);
-  if (fromHex.ownerUserId !== actorUserId) return { applied: false, movedTroops: 0 };
+  if (fromHex.ownerUserId !== actorUserId) {
+    return {
+      applied: false,
+      movedTroops: 0,
+      actionType,
+      battleRounds: 0,
+      stateBefore,
+      stateAfter: cloneGameState(state),
+    };
+  }
 
   if (actionType === "fortify") {
-    if (fromHexId !== toHexId) return { applied: false, movedTroops: 0 };
+    if (fromHexId !== toHexId) {
+      return {
+        applied: false,
+        movedTroops: 0,
+        actionType,
+        battleRounds: 0,
+        stateBefore,
+        stateAfter: cloneGameState(state),
+      };
+    }
     fromHex.troopCount = Math.max(0, fromHex.troopCount) + 200;
-    return { applied: true, movedTroops: 0 };
+    return {
+      applied: true,
+      movedTroops: 0,
+      actionType,
+      battleRounds: 0,
+      stateBefore,
+      stateAfter: cloneGameState(state),
+    };
   }
 
   if (actionType === "promote") {
-    if (fromHexId !== toHexId) return { applied: false, movedTroops: 0 };
-    if (fromHex.troopCount < 100) return { applied: false, movedTroops: 0 };
+    if (fromHexId !== toHexId || fromHex.troopCount < 100) {
+      return {
+        applied: false,
+        movedTroops: 0,
+        actionType,
+        battleRounds: 0,
+        stateBefore,
+        stateAfter: cloneGameState(state),
+      };
+    }
     fromHex.troopCount -= 100;
     fromHex.knightCount = Math.max(0, fromHex.knightCount) + 1;
-    return { applied: true, movedTroops: 0 };
+    return {
+      applied: true,
+      movedTroops: 0,
+      actionType,
+      battleRounds: 0,
+      stateBefore,
+      stateAfter: cloneGameState(state),
+    };
   }
 
   if ((actionType === "move" || actionType === "attack") && (troopCount === null || troopCount < 1)) {
-    return { applied: false, movedTroops: 0 };
+    return {
+      applied: false,
+      movedTroops: 0,
+      actionType,
+      battleRounds: 0,
+      stateBefore,
+      stateAfter: cloneGameState(state),
+    };
   }
 
   const availableTroops = Math.max(0, fromHex.troopCount);
-  if (availableTroops <= 0) return { applied: false, movedTroops: 0 };
+  if (availableTroops <= 0) {
+    return {
+      applied: false,
+      movedTroops: 0,
+      actionType,
+      battleRounds: 0,
+      stateBefore,
+      stateAfter: cloneGameState(state),
+    };
+  }
 
   const movedTroops = Math.min(troopCount ?? 0, availableTroops);
 
-  if (movedTroops <= 0) return { applied: false, movedTroops: 0 };
+  if (movedTroops <= 0) {
+    return {
+      applied: false,
+      movedTroops: 0,
+      actionType,
+      battleRounds: 0,
+      stateBefore,
+      stateAfter: cloneGameState(state),
+    };
+  }
 
   fromHex.troopCount = Math.max(0, fromHex.troopCount - movedTroops);
 
+  let battleRounds = 0;
+
   if (actionType === "attack") {
-    const defendingTroops = Math.max(0, toHex.troopCount);
-    if (movedTroops > defendingTroops) {
+    const defenderUserId = toHex.ownerUserId;
+    if (!defenderUserId || defenderUserId === actorUserId) {
+      fromHex.troopCount += movedTroops;
+      return {
+        applied: false,
+        movedTroops: 0,
+        actionType,
+        battleRounds: 0,
+        stateBefore,
+        stateAfter: cloneGameState(state),
+      };
+    }
+
+    const attackerBonus = battleBonusByUserId.get(actorUserId) ?? 1;
+    const defenderBonus = battleBonusByUserId.get(defenderUserId) ?? 1;
+
+    let attackerTroops = movedTroops;
+    let defenderTroops = Math.max(0, toHex.troopCount);
+
+    while (attackerTroops > 0 && defenderTroops > 0) {
+      battleRounds += 1;
+      const attackerRoll = rollD6(random) + attackerBonus;
+      const defenderRoll = rollD6(random) + defenderBonus;
+
+      if (defenderRoll >= attackerRoll) {
+        attackerTroops -= 1;
+      } else {
+        defenderTroops -= 1;
+      }
+    }
+
+    if (attackerTroops > 0) {
       toHex.ownerUserId = actorUserId;
-      toHex.troopCount = movedTroops - defendingTroops;
+      toHex.troopCount = attackerTroops;
     } else {
-      toHex.troopCount = defendingTroops - movedTroops;
-      if (toHex.troopCount === 0 && toHex.ownerUserId !== actorUserId) {
+      toHex.troopCount = defenderTroops;
+      if (toHex.troopCount === 0) {
         toHex.ownerUserId = "";
       }
     }
@@ -236,6 +397,10 @@ function applyOrderSubmitMove(state: GameState, command: CommandEventRow): { app
   return {
     applied: true,
     movedTroops,
+    actionType,
+    battleRounds,
+    stateBefore,
+    stateAfter: cloneGameState(state),
   };
 }
 
@@ -338,8 +503,40 @@ async function advanceRoundIfAllReady(input: {
 
   const normalizedCommandEvents = normalizeQueuedCommands((commandEvents ?? []) as CommandEventRow[]);
 
+  const { data: playerAllianceRows, error: allianceMembershipErr } = await service
+    .schema("secret_toaster")
+    .from("game_player_alliances")
+    .select("user_id, alliance_id")
+    .eq("game_id", gameId);
+
+  if (allianceMembershipErr) {
+    throw new Error(`Failed to load alliance memberships: ${allianceMembershipErr.message}`);
+  }
+
+  const allianceMemberCount = new Map<string, number>();
+  const allianceByUserId = new Map<string, string | null>();
+  for (const row of playerAllianceRows ?? []) {
+    const userId = typeof row.user_id === "string" ? row.user_id : "";
+    const allianceId = typeof row.alliance_id === "string" ? row.alliance_id : null;
+    if (!userId) continue;
+    allianceByUserId.set(userId, allianceId);
+    if (allianceId) {
+      allianceMemberCount.set(allianceId, (allianceMemberCount.get(allianceId) ?? 0) + 1);
+    }
+  }
+
+  const battleBonusByUserId = new Map<string, number>();
+  for (const [userId, allianceId] of allianceByUserId.entries()) {
+    if (allianceId) {
+      battleBonusByUserId.set(userId, Math.max(1, allianceMemberCount.get(allianceId) ?? 1));
+    } else {
+      battleBonusByUserId.set(userId, 1);
+    }
+  }
+
   const nextState = parseGameState(currentState, round);
   let appliedMoveCount = 0;
+  const deterministicRandom = createDeterministicRandom(`${gameId}:${round}:battle`);
 
   const executionOrder = buildDeterministicExecutionOrder({
     commands: normalizedCommandEvents,
@@ -350,7 +547,12 @@ async function advanceRoundIfAllReady(input: {
   const commandExecutionEvents = executionOrder.map((commandEvent, index) => {
     const command = extractCommandPayload(commandEvent);
     const orderNumber = asInt(command.payload.orderNumber);
-    const moveResult = applyOrderSubmitMove(nextState, commandEvent);
+    const moveResult = applyOrderSubmitMove({
+      state: nextState,
+      command: commandEvent,
+      random: deterministicRandom,
+      battleBonusByUserId,
+    });
     if (moveResult.applied) appliedMoveCount += 1;
 
     return {
@@ -364,8 +566,12 @@ async function advanceRoundIfAllReady(input: {
         commandType: command.commandType,
         payload: command.payload,
         orderNumber,
+        actionType: moveResult.actionType,
         applied: moveResult.applied,
         movedTroops: moveResult.movedTroops,
+        battleRounds: moveResult.battleRounds,
+        stateBefore: moveResult.stateBefore,
+        stateAfter: moveResult.stateAfter,
       },
       caused_by: commandEvent.caused_by,
     };
