@@ -10,12 +10,82 @@ type CommandBody = {
   payload?: Record<string, unknown>;
 };
 
+type OrderSubmitPayload = {
+  orderNumber: number;
+  fromHexId: number;
+  toHexId: number;
+};
+
 type GameRoundRow = {
   round: number;
 };
 
 function asText(value: unknown): string {
   return typeof value === "string" ? value : "";
+}
+
+function asInt(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) return null;
+  if (!Number.isInteger(value)) return null;
+  return value;
+}
+
+function validateCommandPayload(commandType: string, payload: unknown): {
+  valid: boolean;
+  reason?: string;
+  normalizedPayload?: Record<string, unknown>;
+} {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return {
+      valid: false,
+      reason: "payload must be an object",
+    };
+  }
+
+  const recordPayload = payload as Record<string, unknown>;
+
+  if (commandType !== "order.submit") {
+    return {
+      valid: true,
+      normalizedPayload: recordPayload,
+    };
+  }
+
+  const orderNumber = asInt(recordPayload.orderNumber);
+  const fromHexId = asInt(recordPayload.fromHexId);
+  const toHexId = asInt(recordPayload.toHexId);
+
+  if (orderNumber === null || orderNumber < 1) {
+    return {
+      valid: false,
+      reason: "order.submit requires integer orderNumber >= 1",
+    };
+  }
+
+  if (fromHexId === null || fromHexId < 0 || fromHexId > 109) {
+    return {
+      valid: false,
+      reason: "order.submit requires integer fromHexId in range 0..109",
+    };
+  }
+
+  if (toHexId === null || toHexId < 0 || toHexId > 109) {
+    return {
+      valid: false,
+      reason: "order.submit requires integer toHexId in range 0..109",
+    };
+  }
+
+  const normalizedOrderPayload: OrderSubmitPayload = {
+    orderNumber,
+    fromHexId,
+    toHexId,
+  };
+
+  return {
+    valid: true,
+    normalizedPayload: normalizedOrderPayload,
+  };
 }
 
 Deno.serve(async (req: Request) => {
@@ -37,6 +107,11 @@ Deno.serve(async (req: Request) => {
 
   if (!gameId) return badRequest("gameId is required");
   if (!commandType) return badRequest("commandType is required");
+
+  const payloadValidation = validateCommandPayload(commandType, payload);
+  if (!payloadValidation.valid) {
+    return badRequest(payloadValidation.reason ?? "Invalid command payload");
+  }
 
   const userClient = createUserClient(authHeader);
   const service = createServiceClient();
@@ -71,7 +146,7 @@ Deno.serve(async (req: Request) => {
     const eventPayload = {
       round: game.round,
       commandType,
-      payload,
+      payload: payloadValidation.normalizedPayload ?? payload,
       source: "edge-function",
       version: 1,
     };
