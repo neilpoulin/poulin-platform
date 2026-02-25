@@ -178,25 +178,60 @@ function applyOrderSubmitMove(state: GameState, command: CommandEventRow): { app
   const extracted = extractCommandPayload(command);
   if (extracted.commandType !== "order.submit") return { applied: false, movedTroops: 0 };
 
+  const actionType = typeof extracted.payload.actionType === "string" && extracted.payload.actionType.trim().length > 0
+    ? extracted.payload.actionType
+    : "move";
   const fromHexId = asInt(extracted.payload.fromHexId);
   const toHexId = asInt(extracted.payload.toHexId);
   const troopCount = asInt(extracted.payload.troopCount);
-  if (fromHexId === null || toHexId === null || troopCount === null) return { applied: false, movedTroops: 0 };
+  if (fromHexId === null || toHexId === null) return { applied: false, movedTroops: 0 };
 
   const fromHex = ensureHex(state, fromHexId);
   const toHex = ensureHex(state, toHexId);
   if (fromHex.ownerUserId !== actorUserId) return { applied: false, movedTroops: 0 };
 
+  if (actionType === "fortify") {
+    if (fromHexId !== toHexId) return { applied: false, movedTroops: 0 };
+    fromHex.troopCount = Math.max(0, fromHex.troopCount) + 200;
+    return { applied: true, movedTroops: 0 };
+  }
+
+  if (actionType === "promote") {
+    if (fromHexId !== toHexId) return { applied: false, movedTroops: 0 };
+    if (fromHex.troopCount < 100) return { applied: false, movedTroops: 0 };
+    fromHex.troopCount -= 100;
+    fromHex.knightCount = Math.max(0, fromHex.knightCount) + 1;
+    return { applied: true, movedTroops: 0 };
+  }
+
+  if ((actionType === "move" || actionType === "attack") && (troopCount === null || troopCount < 1)) {
+    return { applied: false, movedTroops: 0 };
+  }
+
   const availableTroops = Math.max(0, fromHex.troopCount);
   if (availableTroops <= 0) return { applied: false, movedTroops: 0 };
 
-  const movedTroops = troopCount > 0 ? Math.min(troopCount, availableTroops) : 0;
+  const movedTroops = Math.min(troopCount ?? 0, availableTroops);
 
   if (movedTroops <= 0) return { applied: false, movedTroops: 0 };
 
   fromHex.troopCount = Math.max(0, fromHex.troopCount - movedTroops);
-  toHex.ownerUserId = actorUserId;
-  toHex.troopCount = Math.max(0, toHex.troopCount) + movedTroops;
+
+  if (actionType === "attack") {
+    const defendingTroops = Math.max(0, toHex.troopCount);
+    if (movedTroops > defendingTroops) {
+      toHex.ownerUserId = actorUserId;
+      toHex.troopCount = movedTroops - defendingTroops;
+    } else {
+      toHex.troopCount = defendingTroops - movedTroops;
+      if (toHex.troopCount === 0 && toHex.ownerUserId !== actorUserId) {
+        toHex.ownerUserId = "";
+      }
+    }
+  } else {
+    toHex.ownerUserId = actorUserId;
+    toHex.troopCount = Math.max(0, toHex.troopCount) + movedTroops;
+  }
 
   return {
     applied: true,

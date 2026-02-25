@@ -14,7 +14,8 @@ type OrderSubmitPayload = {
   orderNumber: number;
   fromHexId: number;
   toHexId: number;
-  troopCount: number;
+  actionType: "move" | "attack" | "fortify" | "promote";
+  troopCount?: number;
 };
 
 type GameRoundRow = {
@@ -55,6 +56,7 @@ function validateCommandPayload(commandType: string, payload: unknown): {
   const orderNumber = asInt(recordPayload.orderNumber);
   const fromHexId = asInt(recordPayload.fromHexId);
   const toHexId = asInt(recordPayload.toHexId);
+  const actionType = asText(recordPayload.actionType).trim() || "move";
   const troopCount = asInt(recordPayload.troopCount);
 
   if (orderNumber === null || orderNumber < 1 || orderNumber > 3) {
@@ -78,18 +80,40 @@ function validateCommandPayload(commandType: string, payload: unknown): {
     };
   }
 
-  if (troopCount === null || troopCount < 1) {
+  const normalizedActionType =
+    actionType === "move" || actionType === "attack" || actionType === "fortify" || actionType === "promote"
+      ? actionType
+      : null;
+
+  if (!normalizedActionType) {
     return {
       valid: false,
-      reason: "order.submit requires integer troopCount >= 1",
+      reason: "order.submit actionType must be one of move|attack|fortify|promote",
     };
+  }
+
+  if ((normalizedActionType === "fortify" || normalizedActionType === "promote") && fromHexId !== toHexId) {
+    return {
+      valid: false,
+      reason: `${normalizedActionType} requires fromHexId and toHexId to match`,
+    };
+  }
+
+  if (normalizedActionType === "move" || normalizedActionType === "attack") {
+    if (troopCount === null || troopCount < 1) {
+      return {
+        valid: false,
+        reason: `order.submit ${normalizedActionType} requires integer troopCount >= 1`,
+      };
+    }
   }
 
   const normalizedOrderPayload: OrderSubmitPayload = {
     orderNumber,
     fromHexId,
     toHexId,
-    troopCount,
+    actionType: normalizedActionType,
+    troopCount: normalizedActionType === "move" || normalizedActionType === "attack" ? troopCount ?? undefined : undefined,
   };
 
   return {
